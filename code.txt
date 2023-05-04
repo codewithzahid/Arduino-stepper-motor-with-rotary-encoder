@@ -1,0 +1,1150 @@
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 20, 4);  // define display size
+
+// set Arduino pins for LEDs and Limit switche
+#define RED_LED 5
+#define GREEN_LED 8
+#define LIMIT_NC 11
+#define LIMIT_NO 12
+#define PUSH_BUTTON 9
+
+// set Stepper Motor pins
+#define dirPin 6   // direction pin
+#define stepPin 7  // pulse pin
+
+// set Rotary Encoder pins
+#define ENC_SW 4   // switch pin
+#define ENC_DT 3   // data pin
+#define ENC_CLK 2  // clk pin
+
+// Define variables
+int seconds_left = 30;   // count down time in second
+int interval_time = 10;  // stepper motor speed control
+int count_time = 0;      // calculated time
+int holding_time = 10;   // holding time in second
+
+// define global variables for save data
+unsigned long pre_count_time = 0;
+unsigned long previous_time = 0;
+unsigned long pre_step_time[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+// operation status
+unsigned long counter = 0;
+bool main_function = false;
+
+// define button and encoder global variables
+int reverse_pulse = 0;
+int encoder_counter, main_function_counter, btnState;
+int z_value = 0;
+
+int stepper_info_count = 0;
+int components_value = 0;
+int assemblies_value = 0;
+int extra_distance = 0;
+
+// define stepper speed
+int normal = 100;
+int slow = 200;
+
+// define two distance
+int height_reg = 20;  // in pulses
+int height_slow = 30;
+int rotation_max = 0;
+
+// create custom LCD icons
+byte up_arrow[]{
+  B00100,
+  B01110,
+  B10101,
+  B00100,
+  B00100,
+  B00100,
+  B00100,
+  B00100
+};
+
+byte right_arrow[]{
+  B00000,
+  B00100,
+  B00010,
+  B11111,
+  B00010,
+  B00100,
+  B00000,
+  B00000
+};
+
+void startOperation() {
+  bootScreen();
+  delay(3000);
+  infoScreen();
+  delay(10);
+
+  interval_time = normal;
+  digitalWrite(dirPin, HIGH);
+
+  while (1) {
+    // Check if 1 second has passed
+    lcd.setCursor(8, 0);
+    lcd.print(seconds_left);
+    unsigned long present_time = millis();
+    if (present_time - previous_time >= 1000) {
+      previous_time = present_time;
+      seconds_left--;
+      lcd.setCursor(8, 0);
+      lcd.print("    ");
+    }
+
+    if (seconds_left < 0) {
+      seconds_left = 0;
+    }
+
+    //run the stepper when conditions are true
+    digitalWrite(stepPin, LOW);
+    unsigned long current_time = millis();
+    if (current_time - pre_step_time[0] > interval_time) {
+      digitalWrite(stepPin, HIGH);
+      pre_step_time[0] = current_time;
+    }
+
+    // Check if countdown timer has reached 0 but limit switch not response
+    if (seconds_left == 0) {
+      if (digitalRead(LIMIT_NO) == LOW) {
+        digitalWrite(dirPin, LOW);
+        digitalWrite(stepPin, LOW);
+
+        errorScreen();
+        delay(10000);
+        infoScreen();
+        lcd.setCursor(8, 0);
+        lcd.print("     ");
+        lcd.setCursor(8, 0);
+        lcd.print(seconds_left);
+        delay(10);
+      }
+
+      while (1) {
+        digitalWrite(RED_LED, HIGH);
+        delay(500);
+        digitalWrite(RED_LED, LOW);
+        delay(500);
+      }
+    }
+
+    // Check if limit switch response before countdown timer reach at 0
+    if (digitalRead(LIMIT_NO) == HIGH && seconds_left != 0) {
+      digitalWrite(dirPin, LOW);
+      break;
+    }
+  }
+  if (digitalRead(LIMIT_NO) == 1) {
+    while (seconds_left != 0) {
+      // Check if 1 second has passed
+      lcd.setCursor(8, 0);
+      lcd.print(seconds_left);
+      if (millis() - previous_time >= 1000) {
+        previous_time = millis();
+        seconds_left--;
+        lcd.setCursor(8, 0);
+        lcd.print("   ");
+      }
+
+      if (digitalRead(LIMIT_NO) != 1) {
+        break;
+      }
+    }
+
+    // Check if limit switch response
+    if (digitalRead(LIMIT_NO) == 1 && seconds_left == 0) {
+      lcd.setCursor(8, 0);
+      lcd.print("   ");
+      lcd.setCursor(8, 0);
+      lcd.print("0");
+
+      interval_time = normal;
+
+      while (reverse_pulse != 20) {
+        //stepper run
+        digitalWrite(dirPin, LOW);
+        digitalWrite(stepPin, LOW);
+        unsigned long current_time = millis();
+
+        if (current_time - pre_step_time[1] > interval_time) {
+          digitalWrite(stepPin, HIGH);
+          reverse_pulse++;
+          pre_step_time[1] = current_time;
+        }
+      }
+      z_value = 0;
+      digitalWrite(GREEN_LED, HIGH);
+    }
+  }
+}
+
+void stepperOperation() {
+  if (counter > 0 && main_function == true) {
+    if (main_function_counter != counter) {
+      main_function_counter = counter;
+
+      // main function 1
+      if (main_function_counter == 1) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");  // 20 character
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Homing");
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Move Z-axis:");
+        lcd.setCursor(13, 2);
+        lcd.print(z_value);
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("Speed reg.:");
+        lcd.setCursor(13, 3);
+        lcd.print(normal);
+        delay(300);
+        lcd.setCursor(0, 0);
+        lcd.print("Main");
+        lcd.setCursor(19, 0);
+        lcd.write(0);
+        while (counter == 1) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 1) {
+            delay(100);
+            main_function = false;
+            resetCounter();
+            mainScreen();
+            break;
+          }
+        }
+      }
+
+      // Homing function 2
+      else if (main_function_counter == 2) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");  // 20 character
+        lcd.setCursor(0, 0);
+        lcd.print("Main");
+        lcd.setCursor(19, 0);
+        lcd.write(0);
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Move Z-axis:");
+        lcd.setCursor(13, 2);
+        lcd.print(z_value);
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("Speed reg.:");
+        lcd.setCursor(13, 3);
+        lcd.print(normal);
+        delay(300);
+        lcd.setCursor(0, 1);
+        lcd.print("Homing");
+
+        while (counter == 2) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 2) {
+            delay(100);
+            main_function = false;
+            resetCounter();
+            startOperation();
+            break;
+          }
+        }
+      }
+
+      // move z-axis function 3
+      else if (main_function_counter == 3) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");  // 20 character
+        lcd.setCursor(0, 0);
+        lcd.print("Main");
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Homing");
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("Speed reg.:");
+        lcd.setCursor(13, 3);
+        lcd.print(normal);
+        delay(300);
+        lcd.setCursor(0, 2);
+        lcd.print("Move Z-axis:");
+        lcd.setCursor(13, 2);
+        lcd.print(z_value);
+
+        while (counter == 3) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 3) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(13, 2);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(13, 2);
+              lcd.print(set_value);
+              delay(300);
+              z_value = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // speed reg. function 4
+      else if (main_function_counter == 4) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");
+        lcd.setCursor(0, 0);
+        lcd.print("Main");
+        lcd.setCursor(19, 0);
+        lcd.write(0);
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Homing");
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Move Z-axis:");
+        lcd.setCursor(13, 2);
+        lcd.print(z_value);
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        delay(300);
+        lcd.setCursor(0, 3);
+        lcd.print("Speed reg.:");
+        lcd.setCursor(13, 3);
+        lcd.print(normal);
+
+        while (counter == 4) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 4) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(13, 3);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(13, 3);
+              lcd.print(set_value);
+              delay(300);
+              normal = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      //  Speed slow function 5
+      else if (main_function_counter == 5) {
+        // slow speed
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");
+
+        // holding time
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Holding time:");
+        lcd.setCursor(14, 1);
+        lcd.print(holding_time);
+        lcd.setCursor(17, 1);
+        lcd.print("s");
+
+        // rotaion reg
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Rotation reg.:");
+        lcd.setCursor(15, 2);
+        lcd.print(height_reg);
+
+        // rotation slow
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("Rotation slow:");
+        lcd.setCursor(15, 3);
+        lcd.print(height_slow);
+        delay(300);
+        lcd.setCursor(0, 0);
+        lcd.print("Speed slow:");
+        lcd.setCursor(12, 0);
+        lcd.print(slow);
+        lcd.setCursor(15, 0);
+        lcd.print("mm/s");
+
+        while (counter == 5) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 5) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(12, 0);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(12, 0);
+              lcd.print(set_value);
+              delay(300);
+              slow = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // holding time function 6
+      else if (main_function_counter == 6) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");
+        lcd.setCursor(0, 0);
+        lcd.print("Speed slow:");
+        lcd.setCursor(12, 0);
+        lcd.print(slow);
+        lcd.setCursor(15, 0);
+        lcd.print("mm/s");
+        // holding time
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        // rotaion reg
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Rotation reg.:");
+        lcd.setCursor(15, 2);
+        lcd.print(height_reg);
+
+        // rotation slow
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("Rotation slow:");
+        lcd.setCursor(15, 3);
+        lcd.print(height_slow);
+        delay(300);
+        lcd.setCursor(0, 1);
+        lcd.print("Holding time:");
+        lcd.setCursor(14, 1);
+        lcd.print(holding_time);
+        lcd.setCursor(17, 1);
+        lcd.print("s");
+
+        while (counter == 6) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 6) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(12, 0);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(12, 0);
+              lcd.print(set_value);
+              delay(300);
+              holding_time = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // rotation reg function 7
+      else if (main_function_counter == 7) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");
+        lcd.setCursor(0, 0);
+        lcd.print("Speed slow:");
+        lcd.setCursor(12, 0);
+        lcd.print(slow);
+        lcd.setCursor(15, 0);
+        lcd.print("mm/s");
+
+        // holding time
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Holding time:");
+        lcd.setCursor(14, 1);
+        lcd.print(holding_time);
+        lcd.setCursor(17, 1);
+        lcd.print("s");
+
+        // rotaion reg
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+
+        // rotation slow
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        lcd.setCursor(0, 3);
+        lcd.print("Rotation slow:");
+        lcd.setCursor(15, 3);
+        lcd.print(height_slow);
+        delay(300);
+        lcd.setCursor(0, 2);
+        lcd.print("Rotation reg.:");
+        lcd.setCursor(15, 2);
+        lcd.print(height_reg);
+
+        while (counter == 7) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 7) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(12, 0);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(12, 0);
+              lcd.print(set_value);
+              delay(300);
+              height_reg = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // rotation slow function 8
+      else if (main_function_counter == 8) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");
+        lcd.setCursor(0, 0);
+        lcd.print("Speed slow:");
+        lcd.setCursor(12, 0);
+        lcd.print(slow);
+        lcd.setCursor(15, 0);
+        lcd.print("mm/s");
+
+        // holding time
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Holding time:");
+        lcd.setCursor(14, 1);
+        lcd.print(holding_time);
+        lcd.setCursor(17, 1);
+        lcd.print("s");
+
+        // rotaion reg
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Rotation reg.:");
+        lcd.setCursor(15, 2);
+        lcd.print(height_reg);
+
+        // rotation slow
+        lcd.setCursor(0, 3);
+        lcd.print("                    ");
+        delay(300);
+        lcd.setCursor(0, 3);
+        lcd.print("Rotation slow:");
+        lcd.setCursor(15, 3);
+        lcd.print(height_slow);
+
+        while (counter == 8) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 8) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(12, 0);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(12, 0);
+              lcd.print(set_value);
+              delay(300);
+              height_slow = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // rotation max function 9
+      else if (main_function_counter == 9) {
+        lcd.clear();
+        delay(300);
+        lcd.setCursor(0, 0);
+        lcd.print("Rotation max.:");
+        lcd.setCursor(15, 0);
+        lcd.print(rotation_max);
+
+        while (counter == 9) {
+          if (digitalRead(ENC_SW) == 0 && main_function_counter == 9) {
+            delay(100);
+            resetCounter();
+            while (1) {
+              int set_value = getCounter();
+              lcd.setCursor(15, 0);
+              lcd.print("      ");
+              delay(300);
+              lcd.setCursor(15, 0);
+              lcd.print(set_value);
+              delay(300);
+              rotation_max = set_value;
+              if (digitalRead(ENC_SW) == 0) {
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+void encoderOperation() {
+  if (counter > 0 && main_function == false) {
+    if (encoder_counter != counter) {
+      encoder_counter = counter;
+
+      if (encoder_counter == 1) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");  // 20 character remove
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 1);
+        lcd.print("Counts-Reset");
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Stepper motor");
+        lcd.setCursor(19, 2);
+        lcd.write(1);
+        delay(300);
+        lcd.setCursor(0, 0);
+        lcd.print("Infoscreen");
+        lcd.setCursor(19, 0);
+        lcd.write(0);
+        while (counter == 1) {
+          if (digitalRead(ENC_SW) == 0 && encoder_counter == 1) {
+            delay(100);
+            infoScreen();
+            break;
+          }
+        }
+      }
+
+      else if (encoder_counter == 2) {
+        lcd.setCursor(0, 0);
+        lcd.print("                    ");
+        lcd.setCursor(0, 0);
+        lcd.print("Infoscreen");
+        lcd.setCursor(19, 0);
+        lcd.write(0);
+        lcd.setCursor(0, 1);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+        lcd.print("Stepper motor");
+        lcd.setCursor(19, 2);
+        lcd.write(1);
+        delay(300);
+        lcd.setCursor(0, 1);
+        lcd.print("Counts-Reset");
+
+        while (counter == 2) {
+          if (digitalRead(ENC_SW) == 0 && encoder_counter == 2) {
+            delay(100);
+            lcd.clear();
+            delay(10);
+            lcd.setCursor(0, 0);
+            lcd.print("Do you really want");
+            lcd.setCursor(0, 1);
+            lcd.print("to reset all counts?");
+
+            lcd.setCursor(16, 2);
+            lcd.print("No");
+            resetCounter();
+
+            while (1) {
+              if (counter < 0 || counter > 1) {
+                resetCounter();
+              }
+              if (counter == 1) {
+                lcd.setCursor(16, 2);
+                lcd.print("   ");
+                delay(300);
+                lcd.setCursor(16, 2);
+                lcd.print("No");
+                delay(300);
+                if (digitalRead(ENC_SW) == 0) {
+                  stepperScreen();
+                  break;
+                }
+              } else if (counter == 0) {
+                lcd.setCursor(3, 2);
+                lcd.print("   ");
+                delay(300);
+                lcd.setCursor(3, 2);
+                lcd.print("Yes");
+                delay(300);
+
+                if (digitalRead(ENC_SW) == 0) {
+                  components_value = 0;
+                  lcd.clear();
+                  lcd.setCursor(6, 1);
+                  lcd.print("Success!");
+                  delay(1500);
+                  lcd.clear();
+                  mainScreen();
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    else if (encoder_counter == 3) {
+      lcd.setCursor(0, 0);
+      lcd.print("                    ");
+      lcd.setCursor(0, 0);
+      lcd.print("Infoscreen");
+      lcd.setCursor(19, 0);
+      lcd.write(0);
+      lcd.setCursor(0, 1);
+      lcd.print("                    ");
+      lcd.setCursor(0, 1);
+      lcd.print("Counts-Reset");
+      lcd.setCursor(0, 2);
+      lcd.print("                    ");
+      delay(300);
+      lcd.setCursor(0, 2);
+      lcd.print("Stepper motor");
+      lcd.setCursor(19, 2);
+      lcd.write(1);
+      while (counter == 3) {
+        if (digitalRead(ENC_SW) == 0 && encoder_counter == 3) {
+          delay(100);
+          main_function = true;
+          resetCounter();
+          stepperScreen();
+          break;
+        }
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  lcd.init();
+  lcd.backlight();
+
+  lcd.createChar(0, up_arrow);
+  lcd.createChar(1, right_arrow);
+
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(LIMIT_NC, INPUT);
+  pinMode(LIMIT_NO, INPUT);
+  pinMode(PUSH_BUTTON, INPUT_PULLUP);
+
+  pinMode(stepPin, OUTPUT);
+  pinMode(dirPin, OUTPUT);
+
+  pinMode(ENC_SW, INPUT_PULLUP);
+  pinMode(ENC_CLK, INPUT);
+  pinMode(ENC_DT, INPUT);
+
+  attachInterrupt(digitalPinToInterrupt(ENC_CLK), readEncoder, FALLING);
+  startOperation();
+}
+
+void readEncoder() {
+  int dtValue = digitalRead(ENC_DT);
+  if (dtValue == HIGH) {
+    counter++;  // Clockwise
+  }
+  if (dtValue == LOW) {
+    counter--;  // Counterclockwise
+  }
+}
+
+// Get the counter value, disabling interrupts.
+// This make sure readEncoder() doesn't change the value
+// while we're reading it.
+int getCounter() {
+  int result;
+  noInterrupts();
+  result = counter;
+  interrupts();
+  return result;
+}
+
+void resetCounter() {
+  noInterrupts();
+  counter = 0;
+  interrupts();
+}
+
+void loop() {
+  rotation_max = height_reg + height_slow + extra_distance;
+
+  if (main_function == false) {
+    if (getCounter() > 3 || getCounter() < 0) {
+      resetCounter();
+    }
+
+    int sw_state = digitalRead(ENC_SW);
+    if (sw_state == LOW) {
+      mainScreen();
+    }
+    encoderOperation();
+  }
+
+  else if (main_function == true) {
+    if (getCounter() > 9 || getCounter() < 0) {
+      resetCounter();
+    }
+    stepperOperation();
+  }
+
+  // push button operations
+  btnState = digitalRead(PUSH_BUTTON);
+  if (btnState == LOW) {
+    pressProcess();
+  }
+}
+
+
+void bootScreen() {
+  lcd.clear();
+  delay(10);
+  lcd.setCursor(6, 1);
+  lcd.print("BOOT SCREEN");
+  lcd.setCursor(9, 3);
+  lcd.print("v1.0");
+}
+
+void infoScreen() {
+  lcd.clear();
+  delay(10);
+  lcd.setCursor(0, 0);
+  lcd.print("Counts: ");
+  lcd.setCursor(8, 0);
+  lcd.print("         ");
+  lcd.setCursor(8, 0);
+  lcd.print(pre_step_time[0]);
+  lcd.setCursor(0, 1);
+  lcd.print("Components:");
+  lcd.setCursor(12, 1);
+  lcd.print(components_value);
+  lcd.setCursor(0, 2);
+  lcd.print("Assemblies:");
+  lcd.setCursor(12, 2);
+  lcd.print(assemblies_value);
+}
+
+void errorScreen() {
+  lcd.clear();
+  delay(10);
+  lcd.setCursor(7, 0);
+  lcd.print("ERROR:");
+  lcd.setCursor(4, 1);
+  lcd.print("HOMING FAILED");
+  lcd.setCursor(0, 2);
+  lcd.print("CHECK CABLES POWER");
+  lcd.setCursor(0, 3);
+  lcd.print("AND SWITCH POSITIONS");
+}
+
+void processScreen() {
+  lcd.clear();
+  delay(10);
+  lcd.setCursor(4, 0);
+  lcd.print("Pressing is");
+  lcd.setCursor(4, 1);
+  lcd.print("completed in");
+  lcd.setCursor(4, 2);
+  lcd.print(count_time);
+  lcd.setCursor(7, 2);
+  lcd.print("seconds");
+}
+
+void mainScreen() {
+  lcd.clear();
+  delay(10);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Infoscreen");
+  lcd.setCursor(19, 0);
+  lcd.write(0);
+  lcd.setCursor(0, 1);
+  lcd.print("Counts-Reset");
+  lcd.setCursor(0, 2);
+  lcd.print("Stepper motor");
+  lcd.setCursor(19, 2);
+  lcd.write(1);
+}
+
+void stepperScreen() {
+  lcd.clear();
+  delay(10);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Main              ");
+  lcd.setCursor(19, 0);
+  lcd.write(0);
+  lcd.setCursor(0, 1);
+  lcd.print("Homing");
+  lcd.setCursor(0, 2);
+  lcd.print("Move Z-axis:");
+  lcd.setCursor(0, 3);
+  lcd.print("Speed reg.:");
+}
+
+void pressProcess() {
+  Serial.println("pressProcess");
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+
+  processScreen();
+
+  // plate move down operation start
+  // regular speed
+  if (holding_time != 0) {
+    interval_time = normal;
+    digitalWrite(dirPin, LOW);
+
+    while (height_reg != 0) {
+      //run the stepper when conditions are true
+      digitalWrite(stepPin, LOW);
+      unsigned long current_time = millis();
+      if (current_time - pre_step_time[2] > interval_time) {
+        digitalWrite(stepPin, HIGH);
+        pre_step_time[2] = current_time;
+        height_reg--;
+        if (digitalRead(PUSH_BUTTON) == 0) {
+          duringMoveDown();  // call the move down function during plate move down
+        }
+      }
+    }
+
+    // speed slow
+    interval_time = slow;
+    digitalWrite(dirPin, LOW);
+
+    while (height_slow != 0) {
+      //run the stepper when conditions are true
+      digitalWrite(stepPin, LOW);
+      unsigned long current_time = millis();
+      if (current_time - pre_step_time[3] > interval_time) {
+        digitalWrite(stepPin, HIGH);
+        pre_step_time[3] = current_time;
+        height_slow--;
+        if (digitalRead(PUSH_BUTTON) == 0) {
+          duringMoveDown();  // call the move down function during plate move down
+        }
+      }
+    }
+
+    // waiting for limit switch bump
+    // plate move down stop
+    // holding time start
+    if (digitalRead(LIMIT_NO) != HIGH) {
+      pre_count_time = 0;
+      while (holding_time != 0) {
+        unsigned long present_time = millis();
+        if (present_time - pre_count_time >= 1000) {
+          pre_count_time = present_time;
+          holding_time--;
+        }
+      }
+    }
+  }
+
+  // holding stop
+  // plate start move up
+  if (holding_time == 0) {
+    interval_time = normal;
+    digitalWrite(dirPin, HIGH);
+
+    while (height_reg != 0) {
+      Serial.println("height_reg");
+      //run the stepper when conditions are true
+      digitalWrite(stepPin, LOW);
+      unsigned long current_time = millis();
+      if (current_time - pre_step_time[4] > interval_time) {
+        digitalWrite(stepPin, HIGH);
+        pre_step_time[4] = current_time;
+        height_reg--;
+        if (digitalRead(PUSH_BUTTON) == 0) {
+          duringMoveUp();  // during plate move up
+        }
+      }
+    }
+
+
+    //speed slow
+    interval_time = slow;
+    digitalWrite(dirPin, HIGH);
+
+    while (height_slow != 0) {
+      Serial.println("height_slow");
+      //run the stepper when conditions are true
+      digitalWrite(stepPin, LOW);
+      unsigned long current_time = millis();
+      if (current_time - pre_step_time[5] > interval_time) {
+        digitalWrite(stepPin, HIGH);
+        pre_step_time[5] = current_time;
+        height_slow--;
+        if (digitalRead(PUSH_BUTTON) == 0) {
+          duringMoveUp();  // during plate move up
+        }
+      }
+    }
+
+    // if limit switch bump
+    if (digitalRead(LIMIT_NO) == HIGH) {
+      digitalWrite(dirPin, LOW);
+
+      interval_time = slow;
+      reverse_pulse = 0;
+
+      while (reverse_pulse != 10) {
+        Serial.println("reverse_pulse");
+        //stepper run
+        digitalWrite(stepPin, LOW);
+        unsigned long current_time = millis();
+
+        if (current_time - pre_step_time[6] > interval_time) {
+          digitalWrite(stepPin, HIGH);
+          reverse_pulse++;
+          pre_step_time[6] = current_time;
+        }
+      }
+    }
+
+    // if the full step completed
+    z_value = 0;
+    components_value++;
+    assemblies_value = components_value / 2;
+    infoScreen();
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+  }
+}
+
+void duringMoveDown() {
+  Serial.println("duringMoveDown");
+  infoScreen();
+  if (seconds_left < 0 || seconds_left > 31) {
+    seconds_left = 0;
+  }
+  interval_time = slow;
+  digitalWrite(dirPin, HIGH);
+
+  // waiting for bump to the limit switch
+  while (digitalRead(LIMIT_NO) != HIGH) {
+    //run the stepper when conditions are true
+    digitalWrite(stepPin, LOW);
+    unsigned long current_time = millis();
+    if (current_time - pre_step_time[7] > interval_time) {
+      digitalWrite(stepPin, HIGH);
+      pre_step_time[7] = current_time;
+    }
+  }
+
+  // if limit switch bump
+  if (digitalRead(LIMIT_NO) == HIGH) {
+    digitalWrite(dirPin, LOW);
+    interval_time = slow;
+    reverse_pulse = 0;
+
+    while (reverse_pulse != 10) {
+      //stepper run
+      digitalWrite(stepPin, LOW);
+      unsigned long current_time = millis();
+
+      if (current_time - pre_step_time[8] > interval_time) {
+        digitalWrite(stepPin, HIGH);
+        reverse_pulse++;
+        pre_step_time[8] = current_time;
+      }
+    }
+
+    // set z-value 0 and change leds status
+    z_value = 0;
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+  }
+}
+
+void duringMoveUp() {
+  Serial.println("duringMoveUp");
+  digitalWrite(dirPin, HIGH);
+  digitalWrite(stepPin, HIGH);
+  infoScreen();
+  if (digitalRead(PUSH_BUTTON) == 0) {
+    duringPlateStopped();
+  }
+}
+
+void duringPlateStopped() {
+  Serial.println("duringPlateStopped");
+  interval_time = slow;
+  digitalWrite(dirPin, HIGH);
+
+  while (digitalRead(LIMIT_NO) != HIGH) {
+    //run the stepper when conditions are true
+    digitalWrite(stepPin, LOW);
+    unsigned long current_time = millis();
+    if (current_time - pre_step_time[9] > interval_time) {
+      digitalWrite(stepPin, HIGH);
+      pre_step_time[9] = current_time;
+    }
+  }
+
+  if (digitalRead(LIMIT_NO) == HIGH) {
+    digitalWrite(dirPin, LOW);
+
+    interval_time = slow;
+    reverse_pulse = 0;
+
+    while (reverse_pulse != 10) {
+      //stepper run
+      digitalWrite(stepPin, LOW);
+      unsigned long current_time = millis();
+
+      if (current_time - pre_step_time[10] > interval_time) {
+        digitalWrite(stepPin, HIGH);
+        reverse_pulse++;
+        pre_step_time[10] = current_time;
+      }
+    }
+
+    z_value = 0;
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+  }
+}
